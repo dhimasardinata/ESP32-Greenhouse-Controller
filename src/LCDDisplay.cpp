@@ -1,80 +1,141 @@
+///////////////////////////////////////////////////////////////////////////////////
+// File: LCDDisplay.cpp
+//
+// Description: Controls I2C LCD 20x4 display with robust error handling.
+//              - Probes I2C bus before writes to prevent spam errors
+//              - Gracefully handles LCD disconnection/reconnection
+///////////////////////////////////////////////////////////////////////////////////
+
 #include "LCDDisplay.h"
-#include <stdio.h> // For snprintf
-#include <string.h> // For strncpy
+#include <Arduino.h>
+#include "config.h"
 
-LCDDisplay::LCDDisplay() : _lcd_i2c(LCD_ADDR, 20, 4) {
-    // Constructor body (if any needed besides initializer list)
-}
+#define DEBUG_PRINTLN(level, ...) do { if (DEBUG_LEVEL >= level) { Serial.println(__VA_ARGS__); } } while (0)
 
+/**
+ * Constructor - initializes LCD object with address and dimensions
+ */
+LCDDisplay::LCDDisplay() : lcd_i2c(LCD_ADDR, 20, 4) {}
+
+/**
+ * Initialize LCD display with I2C availability check
+ */
 void LCDDisplay::begin() {
-    _lcd_i2c.init();
-    _lcd_i2c.backlight();
-    _lcd_i2c.setCursor(0, 0);
-    _lcd_i2c.print(F("Relay Ctrl Loading.."));
-}
-
-void LCDDisplay::update(const char* dt, float temp, float hum, float light, bool r1, bool r2, bool r3, bool r4,
-                        float tMin, float tMax, float humMin, float humMax, float lightMin, float lightMax,
-                        bool netConnected, bool isDataStale, bool sdCardOkLocal, bool isInFailSafe) {
-    char buf[21]; // Buffer for LCD line (20 chars + null)
-    _lcd_i2c.clear();
-
-    // Line 0: Status (Time, SD, Network)
-    if (isInFailSafe) {
-        snprintf(buf, sizeof(buf), "** FAILSAFE ** %-8s", dt + 11); // Show last 8 chars of datetime
+    checkAvailability();
+    
+    if (m_available) {
+        lcd_i2c.init();
+        lcd_i2c.backlight();
+        lcd_i2c.setCursor(0, 0);
+        lcd_i2c.print(F("Relay Ctrl Loading.."));
+        DEBUG_PRINTLN(3, "[LCD] Initialized successfully");
     } else {
-        const char* sdStatus = sdCardOkLocal ? "OK" : "!!";
-        const char* netStatus = netConnected ? (isDataStale ? "STL" : "OFF") : "OFF";
-        // Assuming dt is "YYYY-MM-DD HH:MM:SS", dt + 11 gives "HH:MM:SS"
-        snprintf(buf, sizeof(buf), "%-8s SD:%-2s NW:%-3s", dt + 11, sdStatus, netStatus);
+        DEBUG_PRINTLN(1, "[LCD] Not detected at 0x27 - display disabled");
     }
-    _lcd_i2c.setCursor(0, 0); 
-    _lcd_i2c.print(buf);
-
-    // Line 1: Sensor Data (Temp, Humidity, Light)
-    snprintf(buf, sizeof(buf), "T:%.1fC H:%.0f%% L:%.0f", temp, hum, light);
-    _lcd_i2c.setCursor(0, 1); 
-    _lcd_i2c.print(buf);
-
-    // Line 2: Relay Status
-    snprintf(buf, sizeof(buf), "Exh:%c Deh:%c Blw:%c R4:%c",
-             r1 ? 'Y' : 'N', r2 ? 'Y' : 'N', r3 ? 'Y' : 'N', r4 ? 'N' : 'N'); // Assuming R4 is always N
-    _lcd_i2c.setCursor(0, 2); 
-    _lcd_i2c.print(buf);
-
-    // Line 3: Thresholds (Temp, Humidity)
-    // Displaying general T and H thresholds. Blower uses T, Exhaust/Dehumidifier use H.
-    char tempThresholdBuf[40]; // Larger buffer for intermediate formatting
-    snprintf(tempThresholdBuf, sizeof(tempThresholdBuf), "T:%.0f-%.0f H:%.0f-%.0f", tMin, tMax, humMin, humMax);
-    strncpy(buf, tempThresholdBuf, sizeof(buf) - 1); // Copy to LCD line buffer
-    buf[sizeof(buf) - 1] = '\0'; // Ensure null termination
-    _lcd_i2c.setCursor(0, 3); 
-    _lcd_i2c.print(buf);
 }
 
+/**
+ * Check if LCD is available on I2C bus
+ */
+void LCDDisplay::checkAvailability() {
+    Wire.beginTransmission(LCD_ADDR);
+    uint8_t error = Wire.endTransmission();
+    
+    bool wasAvailable = m_available;
+    m_available = (error == 0);
+    m_lastCheck = millis();
+    
+    // Log state changes
+    if (m_available && !wasAvailable) {
+        DEBUG_PRINTLN(2, "[LCD] Detected - enabling display");
+    } else if (!m_available && wasAvailable) {
+        DEBUG_PRINTLN(2, "[LCD] Lost - disabling display");
+    }
+}
+
+/**
+ * Returns true if LCD is currently available
+ */
+bool LCDDisplay::isAvailable() {
+    // Periodic re-check
+    if (millis() - m_lastCheck >= CHECK_INTERVAL_MS) {
+        checkAvailability();
+    }
+    return m_available;
+}
+
+/**
+ * Clear entire display
+ */
+void LCDDisplay::clear() {
+    if (!isAvailable()) return;
+    lcd_i2c.clear();
+}
+
+/**
+ * Display message at specific location
+ */
 void LCDDisplay::message(int col, int row, const char* msg, bool clearLine) {
+    if (!isAvailable()) return;
+    
     if (clearLine) {
-        _lcd_i2c.setCursor(0, row); 
-        _lcd_i2c.print(F("                    ")); // 20 spaces
+        lcd_i2c.setCursor(0, row);
+        lcd_i2c.print(F("                    ")); // 20 spaces
     }
-    _lcd_i2c.setCursor(col, row);
+    lcd_i2c.setCursor(col, row);
+
     char buf[21];
-    snprintf(buf, sizeof(buf), "%-20s", msg); // Pad with spaces to 20 chars
-    _lcd_i2c.print(buf);
+    snprintf(buf, sizeof(buf), "%-20s", msg);
+    lcd_i2c.print(buf);
+
+    DEBUG_PRINTLN(3, msg);
 }
 
-void LCDDisplay::clear() { 
-    _lcd_i2c.clear(); 
-}
+/**
+ * Full display update with all status information
+ */
+void LCDDisplay::update(const char* dt, float temp, float hum, float light, bool r1, bool r2, bool r3, bool fogStatus,
+                        float tMin, float tMax, float humMin, float humMax,
+                        bool netConnected, bool isDataStale, bool sdCardOkLocal, bool isInFailSafe,
+                        int rssi, bool isGprs) {
+    
+    if (!isAvailable()) return;
+    
+    char buf[21];
+    lcd_i2c.clear();
 
-void LCDDisplay::setCursor(int col, int row) { 
-    _lcd_i2c.setCursor(col, row); 
-}
+    // Row 1: Time and network status
+    if (isInFailSafe) {
+        snprintf(buf, sizeof(buf), "** FAILSAFE ** %-8s", dt + 11);
+    } else {
+        const char* netType = isGprs ? "GP" : "WF";
+        const char* netStatus;
+        if (netConnected) {
+            netStatus = isDataStale ? "ST" : "OK";
+        } else {
+            netStatus = "OF";
+        }
+        snprintf(buf, sizeof(buf), "%-8s %s:%s [%d]", dt + 11, netType, netStatus, rssi);
+    }
+    lcd_i2c.setCursor(0, 0);
+    lcd_i2c.print(buf);
 
-void LCDDisplay::print(const char* msg) { 
-    _lcd_i2c.print(msg); 
-}
+    // Row 2: Sensor data
+    snprintf(buf, sizeof(buf), "T:%.1fC H:%.0f%% L:%.0f", temp, hum, light);
+    lcd_i2c.setCursor(0, 1);
+    lcd_i2c.print(buf);
 
-void LCDDisplay::print(const __FlashStringHelper* msg) { 
-    _lcd_i2c.print(msg); 
+    // Row 3: Relay status + fog indicator
+    snprintf(buf, sizeof(buf), "Ex:%c Dh:%c Bl:%c f=%d",
+             r1 ? 'Y' : 'N',
+             r2 ? 'Y' : 'N',
+             r3 ? 'Y' : 'N',
+             fogStatus ? 1 : 0);
+    lcd_i2c.setCursor(0, 2);
+    lcd_i2c.print(buf);
+
+    // Row 4: Thresholds
+    snprintf(buf, sizeof(buf), "T:%.0f-%.0f H:%.0f-%.0f", tMin, tMax, humMin, humMax);
+    lcd_i2c.setCursor(0, 3);
+    lcd_i2c.print(buf);
 }
