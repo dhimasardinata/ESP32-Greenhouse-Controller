@@ -1,5 +1,9 @@
 # ESP32 Greenhouse Gateway/Controller (ATOMIC)
 
+![PlatformIO](https://img.shields.io/badge/PlatformIO-ESP32-orange?logo=platformio)
+![Language](https://img.shields.io/badge/language-C%2B%2B-blue)
+![License](https://img.shields.io/badge/license-CC--BY--NC--SA--4.0-lightgrey)
+
 ESP32-based gateway/controller firmware for an orchid-greenhouse IoT/WSN system
 (team final project, 2025–2026): it aggregates sensor nodes, drives greenhouse
 equipment (blower, exhaust fan, dehumidifier) via relay/SSR panels, and syncs
@@ -11,7 +15,32 @@ with a cloud backend using store-and-forward caching for unreliable field links.
 - Wi-Fi with GPRS (SIM800) fallback
 
 Companion public repo: [esp8266-sensor-node](https://github.com/dhimasardinata/esp8266-sensor-node)
-(sensor-node firmware). Author portfolio: <https://dhimasardinata.netlify.app/>.
+(sensor-node firmware). Full project case study:
+<https://dhimasardinata.netlify.app/en/#work>.
+
+## Architecture
+
+```text
+ESP8266 nodes (temp/RH/light) ──Wi-Fi──▶ ESP32 gateway ──HTTP/REST──▶ cloud API
+                                            │    ▲
+                    relay/SSR ◀── control ◀──┘    │ threshold/schedule validation
+                    LCD + SD log ◀── local ──────┘    (normalized sensor data)
+WebSocket diagnostics / WebSerial admin / config portal (on-device)
+```
+
+Control pipeline per cycle (`src/main.cpp` loop):
+
+1. **Acquire + normalize** — node readings aggregated in `SensorDataManager`,
+   normalized (`SensorNormalization`) so dropouts and outliers never reach logic.
+2. **Validate** — threshold rules (`ThresholdValidation`) and time schedules
+   (`ScheduleValidation`) decide the desired equipment state.
+3. **Act safely** — `RelayController` switches blowers/fans/dehumidifier through
+   `GatewayControlState`; remote threshold/schedule edits arrive as queued
+   mutations (`DeferredControlActions`) so the control loop never blocks.
+4. **Sync + recover** — telemetry uploads with retry backoff and local cache
+   (store-and-forward); `MyNetworkManager` handles Wi-Fi/GPRS reconnect,
+   `WiFiCredentialStore` persists credentials, RTC drift is re-checked on
+   reconnect, and the task watchdog guards the whole loop.
 
 ## Hardware
 
